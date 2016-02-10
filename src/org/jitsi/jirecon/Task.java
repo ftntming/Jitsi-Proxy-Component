@@ -82,7 +82,7 @@ public class Task
     /**
      * The instance of <tt>RecorderManager</tt>.
      */
-    private StreamRecorderManager recorderMgr;
+    private StreamForwarder forwarder;
 
     /**
      * The thread pool to make the method "start" to be asynchronous.
@@ -144,10 +144,10 @@ public class Task
         jingleSessionMgr.init(connection);
         addEventListener(jingleSessionMgr);
 
-        recorderMgr = new StreamRecorderManager();
-        //wen: disabled this, no video
-        recorderMgr.addTaskEventListener(this);
-        recorderMgr.init(savingDir, dtlsControlMgr.getAllDtlsControl());
+        forwarder = new StreamForwarder();
+
+        forwarder.addTaskEventListener(this);
+        forwarder.init(savingDir, dtlsControlMgr.getAllDtlsControl());
     }
 
     /**
@@ -201,7 +201,7 @@ public class Task
         {
             logger.info(this.getClass() + " stop.");
             transportMgr.free();
-            recorderMgr.stopRecording();
+            forwarder.stopForwarding();
             jingleSessionMgr.disconnect(Reason.SUCCESS, "OK, gotta go.");
             isStopped = true;
             
@@ -245,7 +245,7 @@ public class Task
                     .getFormatAndDynamicPTs(initIq, mediaType));
             }
 
-            Map<MediaType, Long> localSsrcs = recorderMgr.getLocalSsrcs();
+            Map<MediaType, Long> localSsrcs = forwarder.getLocalSsrcs();
             
             // Transport packet extension.
             for (MediaType mediaType : supportedMediaTypes)
@@ -336,7 +336,7 @@ public class Task
             }
             
             /* 5.2 Start recording. */
-            recorderMgr.startRecording(formatAndPTs, streamConnectors, mediaStreamTargets);
+            forwarder.startForwarding(formatAndPTs, streamConnectors, mediaStreamTargets);
 
             fireEvent(new TaskManagerEvent(info.getMucJid(), TaskManagerEvent.Type.TASK_STARTED));
         }
@@ -406,7 +406,7 @@ public class Task
             List<EndpointInfo> endpoints =
                 jingleSessionMgr.getEndpoints();
             
-            recorderMgr.setEndpoints(endpoints);
+            forwarder.setEndpoints(endpoints);
         }
 
         else if (event.getType() == TaskEvent.Type.PARTICIPANT_LEFT)
@@ -424,7 +424,7 @@ public class Task
             }
             else
             {
-                recorderMgr.setEndpoints(endpoints);
+            	forwarder.setEndpoints(endpoints);
             }
         }
     }

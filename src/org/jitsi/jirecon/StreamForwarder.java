@@ -24,7 +24,10 @@ import java.util.*;
 import java.util.Map.*;
 import java.util.concurrent.*;
 
+import javax.media.rtp.ReceiveStream;
+
 import org.jitsi.impl.neomedia.recording.*;
+import org.jitsi.impl.neomedia.rtp.StreamRTPManager;
 import org.jitsi.impl.neomedia.rtp.translator.*;
 import org.jitsi.jirecon.TaskEvent.*;
 import org.jitsi.jirecon.datachannel.*;
@@ -41,15 +44,15 @@ import org.json.simple.parser.*;
  * streams and save them into local files.
  *
  * @todo Review thread safety.
- * @author lishunyang
+ * @author wen
  */
-public class StreamRecorderManager
+public class StreamForwarder
 {
     /**
      * The <tt>Logger</tt>, used to log messages to standard output.
      */
     private static final Logger logger = Logger
-        .getLogger(StreamRecorderManager.class);
+        .getLogger(StreamForwarder.class);
 
     /**
      * The map between <tt>MediaType</tt> and <tt>MediaStream</tt>. Those are
@@ -64,19 +67,21 @@ public class StreamRecorderManager
     private MediaService mediaService;
 
     /**
-     * The map between <tt>MediaType</tt> and <tt>RTPTranslator</tt>. Those are
-     * used to initialize recorder.
+     * The map between <tt>MediaType</tt> and <tt>RTPTranslator</tt>. 
      */
-    private Map<MediaType, RTPTranslator> rtpTranslators =
-        new HashMap<MediaType, RTPTranslator>();
+    private Map<MediaType, RTPTranslator> rtpTranslators = new HashMap<MediaType, RTPTranslator>();
 
     /**
-     * The map between <tt>MediaType</tt> and <tt>Recorder</tt>. Those are used
-     * to record media streams into local files.
+     * The map between <tt>MediaType</tt> and <tt>StreamRTPManager</tt>. Those are used
+     * to get receiveStream and create new sendStream.
      */
-    private Map<MediaType, Recorder> recorders =
-        new HashMap<MediaType, Recorder>();
+    private Map<MediaType, StreamRTPManager> streamRTPManagers = new HashMap<MediaType, StreamRTPManager>();
 
+    /**
+     * SCTP data channel. It's used for receiving some event packets, such as
+     * SPEAKER_CHANGE event.
+     */
+    private Vector<ReceiveStream> receiveStream;
     /**
      * SCTP data channel. It's used for receiving some event packets, such as
      * SPEAKER_CHANGE event.
@@ -118,7 +123,7 @@ public class StreamRecorderManager
     /**
      * Whether the <tt>JireconRecorderImpl</tt> is recording streams.
      */
-    private boolean isRecording = false;
+    //private boolean isRecording = false;
 
     /**
      * Indicate where <tt>JireconRecorderImpl</tt> will put the local files.
@@ -165,7 +170,7 @@ public class StreamRecorderManager
      * @throws Exception if some operation failed and the
      *             recording is aborted.
      */
-    public void startRecording(
+    public void startForwarding(
         Map<MediaType, Map<MediaFormat, Byte>> formatAndDynamicPTs,
         Map<MediaType, StreamConnector> connectors,
         Map<MediaType, MediaStreamTarget> targets)
@@ -175,8 +180,8 @@ public class StreamRecorderManager
          * Here we don't guarantee whether file path is available.
          * RecorderEventHandlerImpl needs check this and do some job.
          */
-        final String filename = "metadata.json";
-        eventHandler = new RecorderEventHandlerImpl(outputDir + "/" + filename);
+        //final String filename = "metadata.json";
+        //eventHandler = new RecorderEventHandlerImpl(outputDir + "/" + filename);
         /*
          * 1. Open sctp data channel, if there is data connector and target.
          */
@@ -193,22 +198,22 @@ public class StreamRecorderManager
         startReceivingStreams();
 
         /*
-         * 4. Prepare audio and video recorders.
+         * 4. Prepare new audio and video MediaStream.
          */
-        prepareRecorders();
+        prepareForwarder();
 
-        /*
-         * 5. Start recording audio and video streams.
+        /* 
+         * 5. Start forwarding audio and video streams.
          */
-        startRecordingStreams();
+        startForwardingStreams();
     }
 
     /**
-     * Stop the recording.
+     * Stop the converting.
      */
-    public void stopRecording()
+    public void stopForwarding()
     {
-        stopRecordingStreams();
+        //stopConvertingStreams();
         stopReceivingStreams();
         closeDataChannel();
 
@@ -274,6 +279,22 @@ public class StreamRecorderManager
             stream.setRTPTranslator(getTranslator(mediaType));
         }
     }
+    
+    /**
+     * Initiate the StreamRTPManager
+     */
+    private void prepareForwarder() throws Exception
+    {
+        logger.debug("prepareConverter");
+
+        for (Entry<MediaType, MediaStream> e : streams.entrySet())
+        {
+            StreamRTPManager streamRTPManager = new StreamRTPManager(e.getValue(), e.getValue().getRTPTranslator());
+            streamRTPManagers.put(e.getKey(), streamRTPManager);
+        }
+
+        //updateSynchronizers();
+    }
 
     /**
      * The shared synchronizer between the audio and the video recorder.
@@ -290,29 +311,6 @@ public class StreamRecorderManager
         return synchronizer;
     }
 
-    /**
-     * Make the <tt>JireconRecorderImpl</tt> ready to start recording media
-     * streams.
-     * 
-     * @throws Exception if some operation failed and the
-     *             preparation is aborted.
-     */
-    private void prepareRecorders() throws Exception
-    {
-        logger.debug("prepareRecorders");
-
-        for (Entry<MediaType, RTPTranslator> e : rtpTranslators.entrySet())
-        {
-            Recorder recorder = mediaService.createRecorder(e.getValue());
-            // The idea is for the two recorders (for audio and video) to share
-            // a Synchronizer instance. Otherwise audio and video will not be
-            // synced.
-            recorder.setSynchronizer(getSynchronizer());
-            recorders.put(e.getKey(), recorder);
-        }
-
-        updateSynchronizers();
-    }
 
     /**
      * Open data channel, build SCTP connection with remote sctp server.
@@ -365,41 +363,35 @@ public class StreamRecorderManager
     }
 
     /**
-     * Start recording media streams.
-     * 
+     * Start forwarding media streams.
+     * @author wen
      * @throws Exception if some operation failed and the
      *             recording is aborted.
      */
-    private void startRecordingStreams() throws Exception
+    private void startForwardingStreams() throws Exception
     {
         logger.debug("startRecording");
         
         if (!isReceiving)
         {
             throw new Exception(
-                "Could not start recording streams, media streams are not receiving.");
-        }
-        if (isRecording)
-        {
-            throw new Exception(
-                "Could not start recording streams, recorders are already recording.");
+                "Could not start forwarding streams, media streams are not receiving.");
         }
 
-        for (Entry<MediaType, Recorder> entry : recorders.entrySet())
+        for (Entry<MediaType, StreamRTPManager> entry : streamRTPManagers.entrySet())
         {
-            final Recorder recorder = entry.getValue();
-            //wen: disabled, no video
-            recorder.setEventHandler(eventHandler);
+            final StreamRTPManager streamRTPManager = entry.getValue();
+            //recorder.setEventHandler(eventHandler);
             try
             {
-                recorder.start(entry.getKey().toString(), outputDir);
+                receiveStream = streamRTPManager.getReceiveStreams();
+                System.out.println("receiveStream size is ---" + receiveStream.size());
             }
             catch (Exception e)
             {
                 throw new Exception("Could not start recording streams, " + e.getMessage());
             }
         }
-        isRecording = true;
     }
 
     private void closeDataChannel()
@@ -407,23 +399,6 @@ public class StreamRecorderManager
         dataChannel.disconnect();
     }
 
-    /**
-     * Stop recording media streams.
-     */
-    private void stopRecordingStreams()
-    {
-        logger.debug("Stop recording streams.");
-        
-        if (!isRecording)
-            return;
-
-        for (Entry<MediaType, Recorder> e : recorders.entrySet())
-        {
-            e.getValue().stop();
-        }
-        recorders.clear();
-        isRecording = false;
-    }
 
     /**
      * Stop receiving media streams.
@@ -638,38 +613,38 @@ public class StreamRecorderManager
         synchronized (endpointsSyncRoot)
         {
             endpoints = newEndpoints;
-            updateSynchronizers();
+            //updateSynchronizers();
         }
     }
 
-    void updateSynchronizers()
-    {
-        synchronized (endpointsSyncRoot)
-        {
-            for (EndpointInfo endpoint : endpoints)
-            {
-                final String endpointId = endpoint.getId();
-                for (Entry<MediaType, Long> ssrc : endpoint.getSsrcs()
-                    .entrySet())
-                {
-                    Recorder recorder = recorders.get(ssrc.getKey());
-                    // During the ICE connectivity establishment and after we've
-                    // joined the MUC, there is a high probability that we
-                    // process a media type/ssrc for which we *don't* have a
-                    // recorder yet (because we get XMPP presence packets before
-                    // the recorders are prepared (see method
-                    // prepareRecorders())
-                    if (recorder != null)
-                    {
-                        Synchronizer synchronizer = recorder.getSynchronizer();
-                        synchronizer.setEndpoint(ssrc.getValue(), endpointId);
-                    }
-                    logger.info("endpoint: " + endpointId + " " + ssrc.getKey()
-                        + " " + ssrc.getValue());
-                }
-            }
-        }
-    }
+//    void updateSynchronizers()
+//    {
+//        synchronized (endpointsSyncRoot)
+//        {
+//            for (EndpointInfo endpoint : endpoints)
+//            {
+//                final String endpointId = endpoint.getId();
+//                for (Entry<MediaType, Long> ssrc : endpoint.getSsrcs()
+//                    .entrySet())
+//                {
+//                    //Recorder recorder = recorders.get(ssrc.getKey());
+//                    // During the ICE connectivity establishment and after we've
+//                    // joined the MUC, there is a high probability that we
+//                    // process a media type/ssrc for which we *don't* have a
+//                    // recorder yet (because we get XMPP presence packets before
+//                    // the recorders are prepared (see method
+//                    // prepareRecorders())
+//                    if (recorder != null)
+//                    {
+//                        Synchronizer synchronizer = recorder.getSynchronizer();
+//                        synchronizer.setEndpoint(ssrc.getValue(), endpointId);
+//                    }
+//                    logger.info("endpoint: " + endpointId + " " + ssrc.getKey()
+//                        + " " + ssrc.getValue());
+//                }
+//            }
+//        }
+//    }
 
     /**
      * Add <tt>JireconTaskEvent</tt> listener.
